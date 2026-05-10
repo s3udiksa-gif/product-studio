@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/analyze", "destination": "/api/analyze" },
+    { "source": "/api/generate", "destination": "/api/generate" },
+    { "source": "/(.*)", "destination": "/public/index.html" }
+  ]
+}
