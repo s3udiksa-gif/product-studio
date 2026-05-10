@@ -10,7 +10,8 @@ export default async function handler(req, res) {
   const { imageBase64, imageType, prompt, negativePrompt } = req.body;
   const STABILITY_KEY = process.env.STABILITY_API_KEY;
 
-  if (!STABILITY_KEY) return res.status(500).json({ error: 'STABILITY_API_KEY غير موجود في الإعدادات' });
+  if (!STABILITY_KEY) return res.status(500).json({ error: 'STABILITY_API_KEY غير موجود' });
+  if (!prompt) return res.status(400).json({ error: 'البرومبت فارغ' });
 
   try {
     const byteChars = Buffer.from(imageBase64, 'base64');
@@ -22,12 +23,14 @@ export default async function handler(req, res) {
     formData.append('image_strength', '0.35');
     formData.append('text_prompts[0][text]', prompt);
     formData.append('text_prompts[0][weight]', '1');
-    formData.append('text_prompts[1][text]', negativePrompt);
+    formData.append('text_prompts[1][text]', negativePrompt || 'blurry, low quality, distorted, text, watermark');
     formData.append('text_prompts[1][weight]', '-1');
     formData.append('cfg_scale', '7');
     formData.append('samples', '1');
     formData.append('steps', '30');
     formData.append('style_preset', 'photographic');
+    formData.append('width', '1024');
+    formData.append('height', '1024');
 
     const response = await fetch(
       'https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image',
@@ -43,7 +46,7 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ error: err.message || 'خطأ من Stability AI' });
+      return res.status(response.status).json({ error: err.message || `خطأ ${response.status}` });
     }
 
     const data = await response.json();
