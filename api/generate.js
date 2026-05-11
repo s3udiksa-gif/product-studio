@@ -1,16 +1,37 @@
-export const config = { api: { bodyParser: { sizeLimit: '10mb' } } };
+export const config = { 
+  api: { bodyParser: { sizeLimit: '10mb' }, responseLimit: false },
+  maxDuration: 120
+};
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function pollReplicate(predictionId, token) {
+async function runModel(owner, name, input, token) {
+  // Get latest version
+  const modelRes = await fetch(`https://api.replicate.com/v1/models/${owner}/${name}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const model = await modelRes.json();
+  const version = model?.latest_version?.id;
+  if (!version) throw new Error(`ما لقيت النموذج: ${owner}/${name}`);
+
+  // Run prediction
+  const predRes = await fetch('https://api.replicate.com/v1/predictions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version, input })
+  });
+  const pred = await predRes.json();
+  if (!pred.id) throw new Error(pred.detail || 'فشل تشغيل النموذج');
+
+  // Poll
   for (let i = 0; i < 60; i++) {
     await sleep(3000);
-    const res = await fetch(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+    const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${pred.id}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
-    const data = await res.json();
+    const data = await pollRes.json();
     if (data.status === 'succeeded') return data.output;
-    if (data.status === 'failed') throw new Error(data.error || 'فشل التوليد');
+    if (data.status === 'failed') throw new Error(data.error || 'فشل النموذج');
   }
   throw new Error('انتهى الوقت');
 }
@@ -29,69 +50,34 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { imageBase64, imageType, angle, direction } = req.body;
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN;
-
-  if (!REPLICATE_TOKEN) return res.status(500).json({ error: 'REPLICATE_API_TOKEN غير موجود' });
-
-  // Map angle/direction to azimuth/elevation angles for Zero123
-  let azimuth = 0;
-  let elevation = 0;
-
-  if (angle === 'front') { azimuth = 0; elevation = 0; }
-  else if (angle === 'back') { azimuth = 180; elevation = 0; }
-  else if (angle === 'side') {
-    if (direction === 'left') { azimuth = -90; elevation = 0; }
-    else if (direction === 'right') { azimuth = 90; elevation = 0; }
-    else if (direction === 'top-left') { azimuth = -45; elevation = 30; }
-    else if (direction === 'top-right') { azimuth = 45; elevation = 30; }
-  }
+  const TOKEN = process.env.REPLICATE_API_TOKEN;
+  if (!TOKEN) return res.status(500).json({ error: 'REPLICATE_API_TOKEN غير موجود' });
 
   const imageDataUrl = `data:${imageType || 'image/jpeg'};base64,${imageBase64}`;
 
+  // Angle mapping
+  let azimuth = 0, polar = 0;
+  if (angle === 'back')              { azimuth = 180; polar = 0; }
+  else if (angle === 'front')        { azimuth = 0;   polar = 0; }
+  else if (direction === 'right')    { azimuth = 90;  polar = 0; }
+  else if (direction === 'left')     { azimuth = -90; polar = 0; }
+  else if (direction === 'top-right'){ azimuth = 45;  polar = -30; }
+  else if (direction === 'top-left') { azimuth = -45; polar = -30; }
+
   try {
-    // Step 1: Remove background using Replicate
-    const bgRes = await fetch('https://api.replicate.com/v1/predictions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${REPLICATE_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        version: '4067ee2a58f6c161d434a9c077cfa012820b8e076efa2772aa171e26557da919',
-        input: { image: imageDataUrl }
-      })
-    });
+    // Step 1: Remove background
+    const bgOutput = await runModel('cjwbw', 'rembg', { image: imageDataUrl }, TOKEN);
+    const cleanUrl = Array.isArray(bgOutput) ? bgOutput[0] : bgOutput;
 
-    const bgPred = await bgRes.json();
-    if (!bgPred.id) throw new Error('فشل إزالة الخلفية: ' + JSON.stringify(bgPred));
+    // Step 2: Zero123-XL for novel view
+    const viewOutput = await runModel('adirik', 'zero123-xl', {
+      image: cleanUrl,
+      azimuth: azimuth,
+      polar: polar,
+      image_cfg_scale: 3.0,
+    }, TOKEN);
 
-    const bgOutput = await pollReplicate(bgPred.id, REPLICATE_TOKEN);
-    const cleanImageUrl = Array.isArray(bgOutput) ? bgOutput[0] : bgOutput;
-
-    // Step 2: Generate new view using Zero123
-    const viewRes = await fetch('https://api.replicate.com/v1/predictions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${REPLICATE_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        version: 'ed6d8bee9a278b0d7125872bddfb9dd3fc4c401426ad634d8246a660e387475b',
-        input: {
-          image: cleanImageUrl,
-          elevation: elevation,
-          azimuth: azimuth,
-        }
-      })
-    });
-
-    const viewPred = await viewRes.json();
-    if (!viewPred.id) throw new Error('فشل توليد الزاوية: ' + JSON.stringify(viewPred));
-
-    const viewOutput = await pollReplicate(viewPred.id, REPLICATE_TOKEN);
     const resultUrl = Array.isArray(viewOutput) ? viewOutput[0] : viewOutput;
-
-    // Convert to base64
     const resultBase64 = await urlToBase64(resultUrl);
 
     return res.status(200).json({ image: resultBase64 });
