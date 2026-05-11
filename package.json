@@ -1,5 +1,8 @@
 {
   "name": "product-studio-ai",
   "version": "1.0.0",
-  "description": "AI Product Photo Studio"
+  "description": "AI Product Photo Studio",
+  "dependencies": {
+    "sharp": "^0.33.0"
+  }
 }
